@@ -671,3 +671,46 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ─────────────────────────────────────────────
+#  GoPlus API 安全扫描（红线3辅助）
+# ─────────────────────────────────────────────
+
+def check_goplus_security(chain_id, contract_address):
+    """
+    调用 GoPlus API 获取代币安全信息。
+    chain_id: 1=ETH, 56=BSC, 等
+    返回: dict 或 None（失败时）
+    """
+    import urllib.request
+    import json
+    url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={contract_address}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+            result = data.get("result", {})
+            if contract_address.lower() in result:
+                return result[contract_address.lower()]
+    except Exception:
+        pass
+    return None
+
+
+def goplus_to_kill_flags(goplus_data):
+    """
+    将 GoPlus 数据转换为红线3触发标志。
+    返回: (is_honeypot, has_hidden_mint, has_blacklist, can_sell, transfer_pausable)
+    """
+    if not goplus_data:
+        return False, False, False, True, False
+
+    is_honeypot = goplus_data.get("is_honeypot") == "1"
+    has_hidden_mint = goplus_data.get("owner_can_mint") == "1"
+    has_blacklist = goplus_data.get("is_blacklisted") == "1"
+    # sell_tax=0 means sell is possible
+    sell_tax = float(goplus_data.get("sell_tax", "0") or "0")
+    can_sell = sell_tax < 99  # 超过99%税 = 无法卖出
+    transfer_pausable = goplus_data.get("transfer_pausable") == "1"
+
+    return is_honeypot, has_hidden_mint, has_blacklist, can_sell, transfer_pausable
+
