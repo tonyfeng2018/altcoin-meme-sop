@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 山寨币/Meme SOP 极速排雷与动能评分系统
-参考：小龙虾执行手册 v1.0
+参考：小龙虾执行手册 v1.0（完整版）
 """
 
 import sys
@@ -14,16 +14,47 @@ from datetime import datetime
 KILL_SWITCH_REASONS = []
 
 
-def check_rug_history(has_rug, bundle_ratio=None, dev_reputation="unknown"):
+def check_rug_history(
+    has_rug=False,
+    bundle_ratio=None,
+    dev_reputation="unknown",
+    rug_count=None,       # OKX trenches: 开发者历史Rug次数
+    total_tokens=None,    # OKX trenches: 开发者历史总代币数
+):
     """
     红线1：老鼠仓与发币者声誉
+    触发条件（满足任一）：
+    - has_rug = True
+    - dev_reputation = "rug"
+    - bundle_ratio > 30%
+    - dev_reputation = "low" 且 bundle_ratio > 15%
+    - 开发者历史 Rug率 > 10%（Rug数/总代币数）
     """
+    kills = []
+
     if has_rug or dev_reputation == "rug":
-        KILL_SWITCH_REASONS.append("🚨 红线1：开发者有Rug历史")
+        kills.append("开发者有Rug历史（直接标记）")
+        KILL_SWITCH_REASONS.append("🚨 红线1：开发者有Rug历史（直接标记）")
         return True
-    if bundle_ratio is not None and bundle_ratio > 0.3:
+
+    if bundle_ratio is not None and bundle_ratio > 0.30:
+        kills.append(f"Bundle Detection异常（{bundle_ratio:.1%}）")
         KILL_SWITCH_REASONS.append(f"🚨 红线1：Bundle Detection异常（{bundle_ratio:.1%}），疑似老鼠仓")
         return True
+
+    # OKX trenches 深度检查
+    if rug_count is not None and total_tokens is not None and total_tokens > 10:
+        rug_rate = rug_count / total_tokens
+        if rug_rate > 0.10:  # Rug率>10%
+            kills.append(f"Rug率{rug_rate:.1%}（{rug_count}次/{total_tokens}个代币）")
+            KILL_SWITCH_REASONS.append(f"🚨 红线1：开发者历史Rug率{rug_rate:.1%}（{rug_count}次Rug/{total_tokens}个代币），惯犯")
+            return True
+
+    if dev_reputation == "low" and bundle_ratio is not None and bundle_ratio > 0.15:
+        kills.append(f"开发者声誉差+Bundle偏高{bundle_ratio:.1%}")
+        KILL_SWITCH_REASONS.append(f"🚨 红线1：开发者声誉差+Bundle Detection {bundle_ratio:.1%}")
+        return True
+
     return False
 
 
@@ -44,7 +75,8 @@ def check_honeypot(
     is_open_source=True,
     has_hidden_mint=False,
     has_blacklist=False,
-    can_sell=True
+    can_sell=True,
+    transfer_pausable=False,
 ):
     """
     红线3：蜜罐貔貅
@@ -58,13 +90,15 @@ def check_honeypot(
         reasons.append("含黑名单功能")
     if not can_sell:
         reasons.append("无法卖出（疑似蜜罐）")
+    if transfer_pausable:
+        reasons.append("转账可被暂停（风险）")
     if reasons:
         KILL_SWITCH_REASONS.append("🚨 红线3：" + "、".join(reasons))
         return True
     return False
 
 
-def check_macro_crash(btc_dxy_trend="neutral", vix=None, btc_in_downtrend=False):
+def check_macro_crash(vix=None, btc_in_downtrend=False):
     """
     红线4：宏观环境熔断
     """
@@ -82,6 +116,8 @@ def run_kill_switch(
     has_rug=False,
     bundle_ratio=None,
     dev_reputation="unknown",
+    rug_count=None,
+    total_tokens=None,
     # 红线2
     liquidity_usd=None,
     slippage_pct=None,
@@ -90,6 +126,7 @@ def run_kill_switch(
     has_hidden_mint=False,
     has_blacklist=False,
     can_sell=True,
+    transfer_pausable=False,
     # 红线4
     btc_in_downtrend=False,
     vix=None,
@@ -99,19 +136,15 @@ def run_kill_switch(
     返回：(是否通过, 触发原因列表)
     """
     KILL_SWITCH_REASONS.clear()
-    kills = []
 
-    if check_rug_history(has_rug, bundle_ratio, dev_reputation):
-        kills.append("老鼠仓/Rug")
-    if check_liquidity(liquidity_usd, slippage_pct):
-        kills.append("流动性枯竭")
-    if check_honeypot(is_open_source, has_hidden_mint, has_blacklist, can_sell):
-        kills.append("蜜罐貔貅")
-    if check_macro_crash(None, vix, btc_in_downtrend):
-        kills.append("宏观熔断")
+    killed = (
+        check_rug_history(has_rug, bundle_ratio, dev_reputation, rug_count, total_tokens) or
+        check_liquidity(liquidity_usd, slippage_pct) or
+        check_honeypot(is_open_source, has_hidden_mint, has_blacklist, can_sell, transfer_pausable) or
+        check_macro_crash(vix, btc_in_downtrend)
+    )
 
-    passed = len(kills) == 0
-    return passed, list(KILL_SWITCH_REASONS)
+    return not killed, list(KILL_SWITCH_REASONS)
 
 
 # ─────────────────────────────────────────────
@@ -120,10 +153,10 @@ def run_kill_switch(
 
 def get_model(mc=None, fdv=None):
     """
-    根据流通率路由模型。
     流通率 = MC / FDV
-    模型A：15%-80%（常规模型）
-    模型B：>90%（高流通/Meme）
+    模型A：15%-80%（强叙事币/VC币）
+    模型B：>90%（纯土狗/Meme）
+    <15%：数据可靠性低，谨慎评分
     """
     if mc is not None and fdv is not None and fdv > 0:
         circ_rate = mc / fdv
@@ -132,7 +165,7 @@ def get_model(mc=None, fdv=None):
         elif circ_rate >= 0.15:
             return "A", circ_rate
         else:
-            return "C", circ_rate  # <15%，数据可靠性低
+            return "C", circ_rate
     return None, None
 
 
@@ -143,10 +176,16 @@ def get_model(mc=None, fdv=None):
 def score_module1(btc_d_signal="neutral", total3_signal="neutral"):
     """
     BTC.D（10分）+ TOTAL3（10分）
+    BTC.D下跌=+10（资金分流山寨）；TOTAL3突破=+10（山寨行情）
     """
     btc_score = {"down": 10, "neutral": 0, "up": -10}.get(btc_d_signal, 0)
-    total3_score = {"breakout": 10, "neutral": 0, "down": 0}.get(total3_signal, 0)
-    return btc_score + total3_score, btc_score, total3_score
+    total3_labels = {
+        "breakout": ("突破阻力位/上升通道", 10),
+        "neutral": ("震荡", 0),
+        "down": ("震荡下跌", 0),
+    }
+    total3_label, total3_score = total3_labels.get(total3_signal, ("未知", 0))
+    return btc_score + total3_score, btc_score, total3_score, total3_label
 
 
 # ─────────────────────────────────────────────
@@ -154,52 +193,90 @@ def score_module1(btc_d_signal="neutral", total3_signal="neutral"):
 # ─────────────────────────────────────────────
 
 def score_model_a(
-    unlock_status="normal",      # safe(15) / normal(5) / cliff(-15)
-    cex_flow="neutral",          # outflow(15) / neutral(0) / huge_inflow(-10)
-    micro_structure="neutral",   # healthy(10) / normal(0) / overheated(-10)
-    event_driver=0,              # 20 / 10 / 0
-    sector_hot=False,            # True(+10) / False(0)
-    fundamentals=False,          # True(+10) / False(0)
+    # 解锁抛压（+15 / +5 / -15）
+    # +15: 未来30天无大额解锁；+5: 常规线性；-15: 未来14天大额悬崖解锁
+    unlock_ahead_days=None,   # 距离下次大额解锁天数
+    unlock_amount_usd=None,  # 解锁金额（美元）
+    # CEX资金流（+15 / 0 / -10）
+    cex_flow="neutral",       # outflow / neutral / huge_inflow
+    # 微观结构（+10 / 0 / -10）
+    oi_trend="neutral",       # rising / neutral / falling
+    funding_rate=None,        # 资金费率（小数，如 0.001 = 0.1%）
+    # 事件驱动（+20 / +10 / 0）
+    event_impact="none",     # major / minor / none
+    # 赛道资金（+10 / 0）
+    sector_hot=False,
+    # 基本面（+10 / 0）
+    tvl_growth_7d=None,     # TVL 7天增长率（小数，如 0.20 = 20%）
+    # CEX上市状态（辅助参考）
+    on_binance=False,
+    on_okx=False,
 ):
+    """
+    模型A：常规模型（流通率15-80%）
+    评估：解锁/CEX/微观结构/事件/赛道/基本面
+    """
     s = 0
     detail = []
 
-    # 解锁抛压
-    if unlock_status == "safe":
-        s += 15; detail.append("无大额解锁+15")
-    elif unlock_status == "cliff":
-        s -= 15; detail.append("大额悬崖解锁-15")
+    # ① 解锁抛压
+    if unlock_ahead_days is not None:
+        if unlock_ahead_days > 30:
+            s += 15
+            detail.append(f"未来{unlock_ahead_days}天无大额解锁+15")
+        elif unlock_ahead_days <= 14:
+            s -= 15
+            detail.append(f"⚠️未来{unlock_ahead_days}天大额悬崖解锁-15（砸盘预警）")
+        else:
+            s += 5
+            detail.append(f"{unlock_ahead_days}天后解锁，常规线性+5")
     else:
-        s += 5; detail.append("常规线性解锁+5")
+        detail.append("解锁数据：未提供（默认+5）")
+        s += 5
 
-    # CEX资金流
+    # ② CEX资金流（Binance/Nansen）
     if cex_flow == "outflow":
-        s += 15; detail.append("CEX净流出+15")
+        s += 15
+        detail.append("CEX净流出（提币建仓）+15")
     elif cex_flow == "huge_inflow":
-        s -= 10; detail.append("CEX巨额流入-10")
+        s -= 10
+        detail.append("⚠️CEX巨额净流入（疑似项目方砸盘）-10")
     else:
         detail.append("CEX进出平衡0")
 
-    # 微观结构
-    if micro_structure == "healthy":
-        s += 10; detail.append("OI上升+费率健康+10")
-    elif micro_structure == "overheated":
-        s -= 10; detail.append("费率过热-10")
+    # ③ 微观结构（OI + 资金费率）
+    if oi_trend == "rising" and funding_rate is not None and funding_rate <= 0.001:
+        s += 10
+        detail.append("OI稳升+费率健康(≤0.1%)+10")
+    elif funding_rate is not None and funding_rate > 0.001:
+        s -= 10
+        detail.append(f"⚠️费率过热({funding_rate:.3%})>-10")
     else:
         detail.append("微观结构正常0")
 
-    # 事件驱动
-    s += event_driver
-    if event_driver == 20: detail.append("重大利好+20")
-    elif event_driver == 10: detail.append("次级利好+10")
+    # ④ 事件驱动
+    if event_impact == "major":
+        s += 20
+        detail.append("未来1-4周重大主网/合作利好+20")
+    elif event_impact == "minor":
+        s += 10
+        detail.append("次级利好+10")
+    else:
+        detail.append("无明确事件0")
 
-    # 赛道资金
+    # ⑤ 赛道资金（okx-dex-market热点榜）
     if sector_hot:
-        s += 10; detail.append("热门赛道+10")
+        s += 10
+        detail.append("所属赛道近3天资金净流入前三+10")
+    else:
+        detail.append("非热门赛道0")
 
-    # 基本面
-    if fundamentals:
-        s += 10; detail.append("TVL/交互量异动+10")
+    # ⑥ 基本面（DefiLlama TVL）
+    if tvl_growth_7d is not None and tvl_growth_7d > 0.15:
+        s += 10
+        detail.append(f"TVL 7天异动+{tvl_growth_7d:.0%}+10")
+    else:
+        detail.append("TVL无异动0")
 
     return s, detail
 
@@ -209,46 +286,86 @@ def score_model_a(
 # ─────────────────────────────────────────────
 
 def score_model_b(
-    holder_ratio=None,            # <15%(15) / 15-30%(0) / >30%(-15)
-    smart_money="neutral",       # buy(20) / neutral(0) / dump(-20)
-    volume_burst=False,           # True(+15) / False(0)
-    social_heat=0,               # 20/10/0
-    micro_structure="neutral",    # healthy(10) / normal(0) / overheated(-10)
+    # 大户控盘度（+15 / 0 / -15）
+    holder_ratio=None,        # 前10大真实个人地址占比
+    lp_ratio=None,           # LP池占比（从holder中排除）
+    # 聪明钱动向（+20 / 0 / -20）
+    smart_money="neutral",   # buy / neutral / dump
+    # 链上量价（+15 / 0）
+    volume_burst=False,      # 24-48h量价二次爆发
+    volume_change_24h=None,   # 24h成交量变化（小数）
+    # 情绪热度（+20 / +10 / 0）
+    social_heat="none",      #爆发 / 有热度 / 无
+    # 微观结构（+10 / +5 / -10）
+    oi_trend="neutral",
+    funding_rate=None,
+    on_cex=False,            # 是否上了大所合约
 ):
+    """
+    模型B：高流通/Meme专属（流通率>90%）
+    评估：大户控盘/Smart Money/量价/情绪/微观结构
+    """
     s = 0
     detail = []
 
-    # 大户控盘度
+    # ① 大户控盘度
     if holder_ratio is not None:
         if holder_ratio < 0.15:
-            s += 15; detail.append(f"前10大占比{holder_ratio:.1%}<15%控盘低+15")
+            s += 15
+            detail.append(f"前10大个人占比{holder_ratio:.1%}<15%且换手充分+15")
         elif holder_ratio > 0.30:
-            s -= 15; detail.append(f"前10大占比{holder_ratio:.1%}>30%高度控盘-15")
+            s -= 15
+            detail.append(f"⚠️前10大占比{holder_ratio:.1%}>30%高度控盘-15（极危）")
         else:
             detail.append(f"前10大占比{holder_ratio:.1%}中等0")
+    else:
+        detail.append("大户数据未提供")
 
-    # 聪明钱动向
+    # ② 聪明钱动向（okx-dex-signal）
     if smart_money == "buy":
-        s += 20; detail.append("Smart Money净买入+20")
+        s += 20
+        detail.append("Smart Money净买入+20")
     elif smart_money == "dump":
-        s -= 20; detail.append("低成本钱包砸盘-20")
+        s -= 20
+        detail.append("⚠️低成本早期钱包向LP池砸盘-20（致命）")
     else:
         detail.append("Smart Money无异动0")
 
-    # 链上量价
+    # ③ 链上量价
     if volume_burst:
-        s += 15; detail.append("交易量二次爆发+15")
+        s += 15
+        detail.append("24-48h量价二次爆发+15")
+    elif volume_change_24h is not None and volume_change_24h > 0.50:
+        s += 15
+        detail.append(f"成交量24h暴涨+{volume_change_24h:.0%}+15")
+    elif volume_change_24h is not None and volume_change_24h < -0.30:
+        detail.append(f"成交量萎缩{abs(volume_change_24h):.0%}0")
+    else:
+        detail.append("链上量能无明显变化0")
 
-    # 情绪热度
-    s += social_heat
-    if social_heat == 20: detail.append("社交热度爆发+20")
-    elif social_heat == 10: detail.append("社区有热度+10")
+    # ④ 情绪热度（推特/社交）
+    if social_heat == "爆发":
+        s += 20
+        detail.append("社交提及量爆发（非单一KOL）+20")
+    elif social_heat == "有热度":
+        s += 10
+        detail.append("社区有一定热度+10")
+    else:
+        detail.append("无人讨论0")
 
-    # 微观结构
-    if micro_structure == "healthy":
-        s += 10; detail.append("OI稳升+费率健康+10")
-    elif micro_structure == "overheated":
-        s -= 10; detail.append("费率过热-10")
+    # ⑤ 微观结构（仅大所合约适用，否则默认+5）
+    if on_cex:
+        if oi_trend == "rising" and funding_rate is not None and funding_rate <= 0.001:
+            s += 10
+            detail.append("大所合约OI稳升+费率健康+10")
+        elif funding_rate is not None and funding_rate > 0.001:
+            s -= 10
+            detail.append(f"大所合约费率过热{funding_rate:.3%}-10")
+        else:
+            detail.append("大所合约微观结构正常0")
+    else:
+        s += 5
+        detail.append("未上大所合约，默认+5分")
 
     return s, detail
 
@@ -258,10 +375,20 @@ def score_model_b(
 # ─────────────────────────────────────────────
 
 def get_signal(total, model, core_penalty_triggered=False):
+    """
+    信号阈值（SOP原始版本）：
+    ≥75分 → 🟢 强烈建议买入
+    55-74分 → ⚪ 底仓观望
+    41-54分 → ⚠️ 谨慎观望（新增中间带）
+    26-40分 → 🟡 风险提示
+    ≤25分 → 🔴 规避/减仓
+    """
     if total >= 75 and not core_penalty_triggered:
         return "🟢 强烈建议买入/建仓", "筹码结构极佳，聪明钱流入+叙事爆发，高胜率做多标准"
     elif total >= 55:
-        return "⚪ 底仓观望/等待突破", "有一定叙事亮点但结构存在瑕疵，可建观察仓跟踪"
+        return "⚪ 底仓观望/等待突破", "有一定叙事亮点但结构存在瑕疵，可建观察仓跟踪，不符合重仓标准"
+    elif total >= 26:
+        return "🟡 风险提示：动能衰退", "缺乏增量资金，宏观信号偏弱，建议对冲或部分止盈"
     else:
         return "🔴 规避/减仓/潜在做空", "动能衰竭抛压沉重，建议清仓或转合约做空观察池"
 
@@ -275,55 +402,80 @@ def score_altcoin(
     ticker=None,
     chain=None,
     contract_address=None,
-    mc=None,        # 流通市值
-    fdv=None,        # 全流通市值
+    mc=None,
+    fdv=None,
 
-    # ── 排雷参数 ──
+    # ═══════════════════════════════════════
+    #  排雷参数（Kill Switch 4条红线）
+    # ═══════════════════════════════════════
+
+    # 红线1：老鼠仓/Rug
     has_rug=False,
-    bundle_ratio=None,
-    dev_reputation="unknown",
-    liquidity_usd=None,
-    slippage_pct=None,
+    bundle_ratio=None,         # Bundle Detection捆绑占比（>30%触发）
+    dev_reputation="unknown",  # unknown / high / low / rug
+    rug_count=None,            # OKX trenches: 历史Rug次数
+    total_tokens=None,         # OKX trenches: 历史总代币数
+
+    # 红线2：流动性枯竭
+    liquidity_usd=None,         # 核心池子美元深度
+    slippage_pct=None,         # 模拟大额交易滑点（>3%触发）
+
+    # 红线3：蜜罐貔貅
     is_open_source=True,
     has_hidden_mint=False,
     has_blacklist=False,
     can_sell=True,
+    transfer_pausable=False,   # 转账可暂停（额外风险）
+
+    # 红线4：宏观熔断
     btc_in_downtrend=False,
     vix=None,
 
-    # ── 模块一（大盘Beta，20分）──
-    btc_d_signal="neutral",   # down / neutral / up
+    # ═══════════════════════════════════════
+    #  模块一：大盘Beta（20分，A/B通用）
+    # ═══════════════════════════════════════
+    btc_d_signal="neutral",    # down / neutral / up
     total3_signal="neutral",   # breakout / neutral / down
 
-    # ── 模块二A（常规模型，80分）──
-    unlock_status="normal",   # safe / normal / cliff
-    cex_flow="neutral",       # outflow / neutral / huge_inflow
-    micro_structure_a="neutral",
-    event_driver=0,           # 20 / 10 / 0
-    sector_hot=False,
-    fundamentals=False,
+    # ═══════════════════════════════════════
+    #  模块二A：常规模型（80分）
+    #  适用：流通率 15-80%（强叙事币/VC币）
+    # ═══════════════════════════════════════
+    unlock_ahead_days=None,    # 距离下次大额解锁天数
+    unlock_amount_usd=None,    # 解锁金额（美元）
+    cex_flow="neutral",        # outflow / neutral / huge_inflow
+    oi_trend="neutral",        # rising / neutral / falling
+    funding_rate=None,          # 资金费率（小数）
+    event_impact="none",       # major / minor / none
+    sector_hot=False,          # 赛道热点前三
+    tvl_growth_7d=None,       # TVL 7天增长率
 
-    # ── 模块二B（Meme模型，80分）──
-    holder_ratio=None,
-    smart_money="neutral",
-    volume_burst=False,
-    social_heat=0,
-    micro_structure_b="neutral",
+    # ═══════════════════════════════════════
+    #  模块二B：高流通/Meme（80分）
+    #  适用：流通率 >90%
+    # ═══════════════════════════════════════
+    holder_ratio=None,          # 前10大个人地址占比
+    smart_money="neutral",     # buy / neutral / dump
+    volume_burst=False,        # 24-48h量价二次爆发
+    volume_change_24h=None,    # 24h成交量变化率
+    social_heat="none",        # 爆发 / 有热度 / 无
+    on_cex=False,              # 是否上大所合约
 ):
     """
-    山寨币/Meme 综合评分
+    山寨币/Meme SOP 综合评分
 
-    示例用法：
+    示例用法（完整参数）：
     score_altcoin(
         ticker="PEPE",
         chain="Ethereum",
         contract_address="0x6982508145454Ce325dDbE47a25d4ec3d2311933",
-        mc=3.5e9, fdv=3.8e9,  # 流通率 ~92%，用模型B
+        mc=3.5e9, fdv=3.8e9,  # 流通率92% → 模型B
 
         # 排雷
-        is_open_source=True,
-        can_sell=True,
-        vix=18,
+        is_open_source=True, can_sell=True, vix=18,
+        liquidity_usd=100e6, slippage_pct=1.5,
+        bundle_ratio=0.05, dev_reputation="low",
+        rug_count=0, total_tokens=5,
 
         # 模块一
         btc_d_signal="down",
@@ -333,7 +485,8 @@ def score_altcoin(
         holder_ratio=0.12,
         smart_money="buy",
         volume_burst=True,
-        social_heat=20,
+        social_heat="爆发",
+        on_cex=True,
     )
     """
 
@@ -342,12 +495,15 @@ def score_altcoin(
         has_rug=has_rug,
         bundle_ratio=bundle_ratio,
         dev_reputation=dev_reputation,
+        rug_count=rug_count,
+        total_tokens=total_tokens,
         liquidity_usd=liquidity_usd,
         slippage_pct=slippage_pct,
         is_open_source=is_open_source,
         has_hidden_mint=has_hidden_mint,
         has_blacklist=has_blacklist,
         can_sell=can_sell,
+        transfer_pausable=transfer_pausable,
         btc_in_downtrend=btc_in_downtrend,
         vix=vix,
     )
@@ -356,16 +512,18 @@ def score_altcoin(
     model, circ_rate = get_model(mc, fdv)
 
     # ── 步骤三：打分 ──
-    m1_total, btc_d_score, total3_score = score_module1(btc_d_signal, total3_signal)
+    m1_total, btc_d_score, total3_score, total3_label = score_module1(btc_d_signal, total3_signal)
 
     if model == "A":
         m2_total, m2_detail = score_model_a(
-            unlock_status=unlock_status,
+            unlock_ahead_days=unlock_ahead_days,
+            unlock_amount_usd=unlock_amount_usd,
             cex_flow=cex_flow,
-            micro_structure=micro_structure_a,
-            event_driver=event_driver,
+            oi_trend=oi_trend,
+            funding_rate=funding_rate,
+            event_impact=event_impact,
             sector_hot=sector_hot,
-            fundamentals=fundamentals,
+            tvl_growth_7d=tvl_growth_7d,
         )
         model_label = "A（常规模型）"
     elif model == "B":
@@ -373,20 +531,23 @@ def score_altcoin(
             holder_ratio=holder_ratio,
             smart_money=smart_money,
             volume_burst=volume_burst,
+            volume_change_24h=volume_change_24h,
             social_heat=social_heat,
-            micro_structure=micro_structure_b,
+            oi_trend=oi_trend,
+            funding_rate=funding_rate,
+            on_cex=on_cex,
         )
         model_label = "B（Meme/高流通）"
     else:
         m2_total = 0
-        m2_detail = ["数据不足，无法评分"]
+        m2_detail = ["流通率<15%，数据可靠性低，建议手动评估"]
         model_label = f"未知（流通率{circ_rate:.1%}）" if circ_rate else "未知"
 
     total = m1_total + m2_total
 
     # ── 核心扣分项检测 ──
     core_penalty = (
-        (model == "A" and unlock_status == "cliff") or
+        (model == "A" and unlock_ahead_days is not None and unlock_ahead_days <= 14) or
         (model == "A" and cex_flow == "huge_inflow") or
         (model == "B" and holder_ratio is not None and holder_ratio > 0.30) or
         (model == "B" and smart_money == "dump")
@@ -411,8 +572,8 @@ def score_altcoin(
         },
         "模块一_大盘Beta（20分）": {
             "小计": m1_total,
-            "BTC.D": {"得分": btc_d_score, "说明": f"BTC.D信号={btc_d_signal}"},
-            "TOTAL3": {"得分": total3_score, "说明": f"TOTAL3信号={total3_signal}"},
+            "BTC.D": {"得分": btc_d_score, "说明": f"BTC.D={btc_d_signal}"},
+            "TOTAL3": {"得分": total3_score, "说明": f"TOTAL3={total3_signal}（{total3_label}）"},
         },
         "模块二_专属因子": {
             "小计": m2_total,
@@ -438,7 +599,6 @@ def print_report(result):
     print(f"模型：{info['使用模型']}")
     print()
 
-    # 排雷
     kill = result["排雷结果"]
     if not kill["通过"]:
         print("🛑 排雷结果：❌ 未通过，触发红线！")
@@ -448,9 +608,9 @@ def print_report(result):
         print("=" * 55)
         print("🔴 极度高危 / 拒绝买入 — 终止评估")
         return
-    else:
-        print("✅ 排雷结果：全部通过，进入打分流程")
-        print()
+
+    print("✅ 排雷结果：全部通过，进入打分流程")
+    print()
 
     m1 = result["模块一_大盘Beta（20分）"]
     m2 = result["模块二_专属因子"]
@@ -458,12 +618,12 @@ def print_report(result):
     print(f"【总分：{result['总分']}分】→ {result['信号']}")
     print(f"说明：{result['信号说明']}")
     if result["核心扣分项"]:
-        print("⚠️ 核心扣分项触发：存在大额解锁/大户砸盘等致命瑕疵")
+        print("⚠️ 核心扣分项触发：大额悬崖解锁/大户砸盘等致命瑕疵")
     print()
 
     print(f"模块一（大盘Beta）：{m1['小计']}分")
-    print(f"  BTC.D： {m1['BTC.D']['得分']:+d}分  {m1['BTC.D']['说明']}")
-    print(f"  TOTAL3：{m1['TOTAL3']['得分']:+d}分  {m1['TOTAL3']['说明']}")
+    print(f"  BTC.D：  {m1['BTC.D']['得分']:+d}分  {m1['BTC.D']['说明']}")
+    print(f"  TOTAL3： {m1['TOTAL3']['得分']:+d}分  {m1['TOTAL3']['说明']}")
     print()
 
     print(f"模块二（专属因子，{info['使用模型']}）：{m2['小计']}分")
@@ -472,48 +632,34 @@ def print_report(result):
     print()
 
     print("─── 评分阈值参考 ───")
-    print(f"  🟢 ≥75分：强烈买入/建仓  （当前{result['总分']}分 {'✅' if result['总分']>=75 else '❌'}）")
-    print(f"  ⚪ 55-74：观望/等待突破  {'✅' if 55<=result['总分']<=74 else ''}")
-    print(f"  🔴 ≤40分：规避/减仓     {'✅' if result['总分']<=40 else ''}")
+    total = result['总分']
+    print(f"  🟢 ≥75分：强烈买入/建仓  （当前{total}分 {'✅' if total>=75 else '❌'}）")
+    print(f"  ⚪ 55-74：观望/等待突破  {'✅' if 55<=total<=74 else ''}")
+    print(f"  🟡 26-40：风险提示  {'✅' if 26<=total<=40 else ''}")
+    print(f"  🔴 ≤25分：规避/减仓     {'✅' if total<=25 else ''}")
 
 
 def main():
     args = sys.argv[1:]
-
     if len(args) >= 1 and args[0] == "--help":
         print("""
-山寨币/Meme SOP 评分工具
+山寨币/Meme SOP 评分工具 v1.1
 
-用法：
-  python3 score.py [ticker] [chain] [model] [选项...]
+用法：python3 score.py [ticker] [chain] [model] [参数...]
 
-参数：
-  ticker        代币名称（如 PEPE）
-  chain         公链（如 Ethereum）
-  model         模型 A 或 B
+重要新增参数：
+  --unlock_days N    距离下次大额解锁天数（>30:+15；15-30:+5；≤14:-15）
+  --cex_flow FLOW    CEX资金流：outflow/neutral/huge_inflow
+  --event MAJOR/MINOR/NONE  事件驱动
+  --sector_hot       赛道热点前三
+  --smart_money BUY/DUMP/NEUTRAL  Smart Money动向
+  --social HEAT/BURST/NONE  社交情绪热度
+  --holder_ratio N   前10大个人地址占比（小数）
 
-示例：
-  # Meme币（模型B）
-  python3 score.py PEPE Ethereum B \\
-    --btc_down --total3_breakout \\
-    --holder_ratio 0.12 \\
-    --smart_money buy \\
-    --volume_burst \\
-    --social_heat 20
-
-  # 常叙事币（模型A）
-  python3 score.py ARB Ethereum A \\
-    --btc_down --total3_neutral \\
-    --unlock safe \\
-    --cex_flow outflow \\
-    --event_driver 20 \\
-    --sector_hot \\
-    --vix 18
+完整参数列表请查看 score.py 源码
 """)
         return
-
     print("⚠️  请使用 Python API 调用 score_altcoin() 函数进行评分")
-    print("    完整参数列表请查看 score.py 源码或 SOP 参考文档")
 
 
 if __name__ == "__main__":
